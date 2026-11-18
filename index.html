@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Localizador de OLT</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  :root { --bg:#f4f6f9; --card:#fff; --ink:#1c2430; --mut:#5d6b7c; --line:#d9dfe7; --brand:#1a73e8; --ok:#0f9d58; --warn:#b26a00; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.4 system-ui,Segoe UI,Arial,sans-serif; color:var(--ink); background:var(--bg); }
+  .app { display:grid; grid-template-columns: 380px 1fr; height:100vh; }
+  aside { background:var(--card); border-right:1px solid var(--line); overflow:auto; padding:16px; }
+  h1 { font-size:18px; margin:0 0 4px; }
+  .sub { color:var(--mut); font-size:12px; margin-bottom:14px; }
+  label { font-weight:600; font-size:12px; }
+  input[type=text] { width:100%; padding:10px; border:1px solid var(--line); border-radius:6px; font-size:14px; margin:4px 0 8px; }
+  button { width:100%; padding:10px; border:0; border-radius:6px; background:var(--brand); color:#fff; font-weight:600; font-size:14px; cursor:pointer; }
+  button:disabled { opacity:.6; cursor:wait; }
+  .msg { margin:10px 0; padding:8px 10px; border-radius:6px; font-size:13px; display:none; }
+  .msg.err { display:block; background:#fdecea; color:#a1261b; }
+  .msg.info { display:block; background:#e8f0fe; color:#174ea6; }
+  .res { margin-top:14px; border:1px solid var(--line); border-radius:8px; padding:12px; }
+  .res.main { border:2px solid var(--ok); }
+  .res h3 { margin:0 0 2px; font-size:15px; }
+  .dist { color:var(--ok); font-weight:700; }
+  .olt { margin-top:8px; padding:8px; background:var(--bg); border-radius:6px; }
+  .olt b { font-size:13px; }
+  .kv { display:grid; grid-template-columns: 52px 1fr; gap:2px 8px; font-size:13px; margin-top:4px; }
+  .kv span:nth-child(odd) { color:var(--mut); }
+  .copy { width:auto; padding:2px 8px; font-size:11px; margin-left:6px; background:#e8eaed; color:var(--ink); }
+  .warn { color:var(--warn); font-size:12px; margin-top:4px; }
+  .small { color:var(--mut); font-size:12px; }
+  .others { margin-top:14px; font-size:13px; }
+  .others div { padding:6px 0; border-bottom:1px solid var(--line); cursor:pointer; }
+  .imp { margin-top:14px; padding:10px; background:var(--bg); border-radius:6px; }
+  .imp input { font-size:12px; margin:4px 0; max-width:100%; }
+  #map { height:100%; }
+  @media (max-width: 800px) { .app { grid-template-columns:1fr; grid-template-rows:auto 55vh; height:auto; } aside { border-right:0; } }
+  #gate { position:fixed; inset:0; z-index:5000; background:var(--bg); display:flex; align-items:center; justify-content:center; padding:16px; }
+  #gate form { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:22px; width:100%; max-width:340px; }
+  #gate h1 { margin-bottom:12px; }
+  #gate input[type=text], #gate input[type=password] { width:100%; padding:10px; border:1px solid var(--line); border-radius:6px; font-size:14px; margin:4px 0 10px; }
+</style>
+</head>
+<body>
+<div id="gate"><form id="loginf">
+  <h1>📍 Localizador de OLT</h1>
+  <div class="sub">Acesso restrito ao time. Informe usuário e senha.</div>
+  <label for="usr">Usuário</label><input type="text" id="usr" autocomplete="username" required>
+  <label for="pwd">Senha</label><input type="password" id="pwd" autocomplete="current-password" required>
+  <button id="entrar" type="submit">Entrar</button>
+  <div id="gmsg" class="msg"></div>
+</form></div>
+<div class="app">
+  <aside>
+    <h1>📍 Localizador de OLT</h1>
+    <div class="sub">Cole o endereço ou a localização do cliente e veja o POP/OLT mais próximo.</div>
+    <label for="entrada">Endereço, link do Google Maps ou coordenadas</label>
+    <input type="text" id="entrada" placeholder="Ex.: Rua X, 100, Nova União RO  |  -10.91, -62.55  |  link completo do Maps" autocomplete="off">
+    <button id="btn">Localizar OLT mais próxima</button>
+    <div id="msg" class="msg"></div>
+    <div class="imp">
+      <label for="kmz">Importar KMZ/KML (POPs extras)</label>
+      <input type="file" id="kmz" accept=".kmz,.kml" multiple>
+      <div class="small">Lido só neste navegador; não é enviado a lugar nenhum. POPs importados não têm IP/VLAN e somem ao recarregar a página.</div>
+    </div>
+    <div id="out"></div>
+    <p class="small" style="margin-top:18px">Distância em linha reta (não é o caminho da fibra). Dados: KMZ dos POPs + planilha de transmissores. <span id="qtd"></span></p>
+  </aside>
+  <div id="map"></div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script>
+// Dados cifrados (AES-GCM, chave derivada de usuario+senha via PBKDF2). Sem usuarios/senhas das OLTs.
+const CIFRADO = "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";
+async function decifrar(usr, pwd) {
+  const raw = Uint8Array.from(atob(CIFRADO), c => c.charCodeAt(0));
+  const salt = raw.slice(0, 16), iv = raw.slice(16, 28), ct = raw.slice(28);
+  const enc = new TextEncoder();
+  const base = await crypto.subtle.importKey('raw', enc.encode(usr.trim().toLowerCase() + ':' + pwd), 'PBKDF2', false, ['deriveKey']);
+  const key = await crypto.subtle.deriveKey({name:'PBKDF2', salt, iterations:600000, hash:'SHA-256'}, base, {name:'AES-GCM', length:256}, false, ['decrypt']);
+  const pt = await crypto.subtle.decrypt({name:'AES-GCM', iv}, key, ct);
+  return JSON.parse(new TextDecoder().decode(pt));
+}
+document.getElementById('loginf').addEventListener('submit', async e => {
+  e.preventDefault();
+  const b = document.getElementById('entrar'), g = document.getElementById('gmsg');
+  b.disabled = true; g.className = 'msg info'; g.textContent = 'Verificando…';
+  try {
+    const data = await decifrar(document.getElementById('usr').value, document.getElementById('pwd').value);
+    document.getElementById('gate').remove();
+    iniciar(data);
+  } catch (err) {
+    g.className = 'msg err'; g.textContent = 'Usuário ou senha incorretos.'; b.disabled = false;
+  }
+});
+
+function iniciar(OLTS) {
+// ---- agrupa OLTs por POP (mesma coordenada) ----
+const pops = {};
+OLTS.forEach(o => {
+  const k = o.lat.toFixed(4) + ',' + o.lon.toFixed(4);
+  (pops[k] = pops[k] || { lat:o.lat, lon:o.lon, nome:o.pop, olts:[] }).olts.push(o);
+});
+const POPS = Object.values(pops);
+document.getElementById('qtd').textContent = OLTS.length + ' OLTs em ' + POPS.length + ' POPs.';
+
+// ---- mapa ----
+const sat = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {maxZoom:19, attribution:'Tiles © Esri'});
+const rot = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}', {maxZoom:19});
+const hib = L.layerGroup([sat, rot]);
+const ruas = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom:19, attribution:'© OpenStreetMap'});
+const map = L.map('map', {layers:[hib]}).setView([-10.9, -62.6], 8);
+L.control.layers({'🛰️ Híbrido':hib, '🗺️ Ruas':ruas, '📷 Satélite':sat}).addTo(map);
+
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function oltHtml(o) {
+  return `<div class="olt"><b>${esc(o.sigla)}</b>
+    <div class="kv"><span>IP</span><span>${esc(o.ip)}</span><span>VLAN</span><span>${esc(o.vlan || '—')}</span><span>Marca</span><span>${esc(o.marca || '—')}</span></div>
+    ${o.ip_alt ? `<div class="warn">⚠ IP divergente na planilha: ${esc(o.ip_alt.join(', '))}</div>` : ''}
+    ${o.aviso_loc ? `<div class="warn">⚠ ${esc(o.aviso_loc)}</div>` : ''}</div>`;
+}
+function popPopup(p) {
+  return `<b>${esc(p.nome)}</b>` + (p.olts.length ? p.olts.map(oltHtml).join('') : '<div class="olt small">POP importado do KMZ — sem IP/VLAN cadastrados.</div>');
+}
+
+const popLayer = L.layerGroup().addTo(map);
+function addPopMarker(p) {
+  const cor = p.importado ? '#f29900' : '#1a73e8';
+  p.marker = L.circleMarker([p.lat, p.lon], {color:'#fff', weight:2, radius:8, fillColor:cor, fillOpacity:.95})
+    .bindPopup(popPopup(p), {minWidth:230}).bindTooltip(p.nome).addTo(popLayer);
+}
+POPS.forEach(addPopMarker);
+if (POPS.length) map.fitBounds(POPS.map(p => [p.lat, p.lon]), {padding:[30,30]});
+
+// ---- importar KMZ/KML (só no navegador) ----
+async function lerKml(file) {
+  let txt;
+  if (/\.kmz$/i.test(file.name)) {
+    const z = await JSZip.loadAsync(await file.arrayBuffer());
+    const entry = Object.values(z.files).find(f => /\.kml$/i.test(f.name));
+    if (!entry) throw new Error('KMZ sem arquivo .kml');
+    txt = await entry.async('string');
+  } else txt = await file.text();
+  const doc = new DOMParser().parseFromString(txt, 'application/xml');
+  if (doc.querySelector('parsererror')) throw new Error('KML inválido');
+  const pts = [];
+  doc.querySelectorAll('Placemark').forEach(pm => {
+    const c = pm.querySelector('Point > coordinates');
+    if (!c) return;
+    const [lon, lat] = c.textContent.trim().split(',').map(parseFloat);
+    if (isNaN(lat) || isNaN(lon)) return;
+    const nome = (pm.querySelector('name')?.textContent || 'POP sem nome').trim();
+    const pasta = pm.parentElement?.closest('Folder')?.querySelector(':scope > name')?.textContent || '';
+    pts.push({nome, lat, lon, pasta});
+  });
+  // arquivos grandes (CTOs, CEOs...): usa só a pasta de POPs, se existir
+  const soPops = pts.filter(x => /pop/i.test(x.pasta));
+  return soPops.length ? soPops : pts;
+}
+document.getElementById('kmz').addEventListener('change', async e => {
+  let add = 0, dup = 0;
+  try {
+    for (const f of e.target.files) {
+      for (const x of await lerKml(f)) {
+        if (POPS.some(p => Math.abs(p.lat - x.lat) < 0.0002 && Math.abs(p.lon - x.lon) < 0.0002)) { dup++; continue; }
+        const p = {lat:x.lat, lon:x.lon, nome:x.nome, olts:[], importado:true};
+        POPS.push(p); addPopMarker(p); add++;
+      }
+    }
+    document.getElementById('qtd').textContent = OLTS.length + ' OLTs em ' + POPS.length + ' POPs.';
+    msg(add + ' POP(s) importado(s)' + (dup ? ', ' + dup + ' já existiam no mapa' : '') + '.', 'info');
+    if (add) map.fitBounds(POPS.map(p => [p.lat, p.lon]), {padding:[30,30]});
+  } catch (err) { msg('Erro ao importar: ' + err.message, 'err'); }
+  e.target.value = '';
+});
+
+// ---- geografia ----
+function km(a, b, c, d) {
+  const R = 6371, r = x => x * Math.PI / 180;
+  const h = Math.sin(r(c - a) / 2) ** 2 + Math.cos(r(a)) * Math.cos(r(c)) * Math.sin(r(d - b) / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+
+// ---- interpretar entrada ----
+function parseCoords(t) {
+  t = decodeURIComponent(t.trim());
+  let m = t.match(/@(-?\d+\.\d+),\s*(-?\d+\.\d+)/) || t.match(/!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/) ||
+          t.match(/(?:[?&](?:q|query|ll|destination)=)(-?\d+\.\d+)[,\s+]+(-?\d+\.\d+)/) ||
+          t.match(/\/place\/(-?\d+\.\d+),\s*(-?\d+\.\d+)/) ||
+          t.match(/^\s*(-?\d{1,2}(?:\.\d+)?)\s*[,;\s]\s*(-?\d{1,3}(?:\.\d+)?)\s*$/);
+  if (!m) m = t.match(/(-?\d{1,2}\.\d{4,})\s*,\s*(-?\d{1,3}\.\d{4,})/);
+  if (!m) return null;
+  const lat = parseFloat(m[1]), lon = parseFloat(m[2]);
+  return (Math.abs(lat) <= 90 && Math.abs(lon) <= 180) ? [lat, lon] : null;
+}
+async function geocode(q) {
+  const u = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=br&accept-language=pt-BR&q=' + encodeURIComponent(q);
+  const r = await fetch(u); const j = await r.json();
+  return j[0] ? [parseFloat(j[0].lat), parseFloat(j[0].lon), j[0].display_name] : null;
+}
+
+// ---- ação principal ----
+let clientLayer = L.layerGroup().addTo(map);
+const msg = (t, c) => { const e = document.getElementById('msg'); e.className = 'msg ' + (c || ''); e.textContent = t || ''; };
+
+async function localizar() {
+  const t = document.getElementById('entrada').value.trim();
+  const btn = document.getElementById('btn');
+  msg(''); document.getElementById('out').innerHTML = '';
+  if (!t) return msg('Informe um endereço, link ou coordenada.', 'err');
+  if (/goo\.gl|maps\.app/i.test(t)) return msg('Link curto (maps.app.goo.gl) não pode ser aberto aqui. Abra o link no navegador e cole o endereço completo da barra, ou cole as coordenadas (lat, lon).', 'err');
+
+  btn.disabled = true;
+  try {
+    let pt = parseCoords(t), label = pt ? 'Coordenadas: ' + pt[0].toFixed(6) + ', ' + pt[1].toFixed(6) : '';
+    if (!pt) {
+      msg('Buscando endereço…', 'info');
+      const g = await geocode(t);
+      if (!g) return msg('Endereço não encontrado. Tente incluir cidade e estado, ou cole as coordenadas.', 'err');
+      pt = [g[0], g[1]]; label = g[2];
+    }
+    msg('');
+    const rank = POPS.map(p => ({p, d: km(pt[0], pt[1], p.lat, p.lon)})).sort((a, b) => a.d - b.d);
+    const best = rank[0];
+
+    clientLayer.clearLayers();
+    L.marker(pt).addTo(clientLayer).bindPopup('<b>Cliente</b><br>' + esc(label));
+    L.polyline([pt, [best.p.lat, best.p.lon]], {color:'#ffeb3b', weight:3, dashArray:'6 6'}).addTo(clientLayer);
+    L.circleMarker([best.p.lat, best.p.lon], {radius:16, color:'#0f9d58', weight:4, fill:false}).addTo(clientLayer);
+    map.fitBounds([pt, [best.p.lat, best.p.lon]], {padding:[60,60], maxZoom:15});
+    best.p.marker.openPopup();
+
+    const outros = rank.slice(1, 4).map((x, i) =>
+      `<div data-i="${i + 1}"><b>${esc(x.p.nome)}</b> — ${x.d.toFixed(1)} km<br><span class="small">${x.p.olts.length ? x.p.olts.map(o => esc(o.sigla) + ' · ' + esc(o.ip) + ' · ' + esc(o.vlan || '—')).join('<br>') : 'importado — sem IP/VLAN'}</span></div>`).join('');
+    document.getElementById('out').innerHTML =
+      `<div class="res main"><div class="small">${esc(label)}</div>
+         <h3>OLT mais próxima: ${esc(best.p.nome)}</h3>
+         <div class="dist">${best.d.toFixed(2)} km em linha reta</div>
+         ${best.p.olts.length ? best.p.olts.map(oltHtml).join('') : '<div class="olt small">POP importado do KMZ — sem IP/VLAN cadastrados.</div>'}
+       </div>
+       <div class="others"><b>Próximos POPs</b>${outros}</div>`;
+    document.querySelectorAll('.others div').forEach(el => el.onclick = () => {
+      const p = rank[+el.dataset.i].p; map.setView([p.lat, p.lon], 14); p.marker.openPopup();
+    });
+  } catch (e) {
+    msg('Erro ao localizar: ' + e.message, 'err');
+  } finally { btn.disabled = false; }
+}
+document.getElementById('btn').onclick = localizar;
+document.getElementById('entrada').addEventListener('keydown', e => { if (e.key === 'Enter') localizar(); });
+}
+</script>
+</body>
+</html>
